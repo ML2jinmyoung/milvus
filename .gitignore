@@ -4,3 +4,4 @@ volumes
 .idea
 .vscode
 .pytest_cache
+docker-compose.yml
