@@ -5,3 +5,7 @@ volumes/
 .vscode
 .pytest_cache
 docker-compose.yml
+origin_documents/
+result/
+result_test/
+web_disk/ 

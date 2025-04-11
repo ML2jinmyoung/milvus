@@ -1,31 +1,29 @@
 import os
 import glob
-import re
-from pathlib import Path
+import json
 from typing import List
+import re
 from dataclasses import dataclass
 from pymilvus import MilvusClient, DataType
 from pymilvus.model.hybrid import BGEM3EmbeddingFunction
 from pymilvus import CollectionSchema, FieldSchema
-import pprint
 import torch
 
 device = "mps" if torch.backends.mps.is_available() else "cpu"
 
-CHUNKED_TXT_DIR = "./result_test"
+CHUNKED_TXT_DIR = "./result"
 EMBEDDING_DIM = 1024
 DB_NAME = "./kc.db"
-COLLECTION_NAME = "test"
-DESCRIPTION = "kc 준법경영실"
+COLLECTION_NAME = "kc"
+DESCRIPTION = "kc"
+DOCUMENT_GROUP = 'law'
 
 
 @dataclass
 class ChunkDocument:
     content: str
-    file_name: str
-    file_path: str
+    metadata: dict
     chunk_id: int
-
 
 class ChunkedTextParser:
     def __init__(self, input_dir: str):
@@ -33,7 +31,6 @@ class ChunkedTextParser:
         self.embedding_model = BGEM3EmbeddingFunction(
             model_name="BAAI/bge-m3",
             device=device,
-            # device="cuda:0",
             return_dense=True
         )
 
@@ -41,26 +38,31 @@ class ChunkedTextParser:
         with open(file_path, "r", encoding="utf-8") as f:
             text = f.read()
 
-        file_name_match = re.search(r'^File:\s*(.+)$', text, re.MULTILINE)
-        file_path_match = re.search(r'^Path:\s*(.+)$', text, re.MULTILINE)
-        if not file_name_match or not file_path_match:
-            print(f"메타데이터 누락: {file_path}")
+        file_match = re.search(r"<File>(.*?)</File>", text, re.DOTALL)
+        path_match = re.search(r"<Path>(.*?)</Path>", text, re.DOTALL)
+
+        if not file_match or not path_match:
+            print(f"❌ 메타데이터 누락: {file_path}")
             return []
 
-        file_name = file_name_match.group(1).strip()
-        file_path_value = file_path_match.group(1).strip()
+        file_name = file_match.group(1).strip()
+        file_path_value = path_match.group(1).strip()
 
-        chunks = re.split(r'^--- Chunk (\d+) ---\s*', text, flags=re.MULTILINE)
+        metadata = {
+            "file": file_name,
+            "path": file_path_value,
+            "document_group": DOCUMENT_GROUP
+        }
+        chunks = re.findall(r"<Chunk>(.*?)</Chunk>", text, re.DOTALL)
+
         parsed_chunks = []
-        for i in range(1, len(chunks), 2):
-            chunk_id = int(chunks[i])
-            chunk_text = chunks[i + 1].strip()
+        for idx, chunk_text in enumerate(chunks):
             parsed_chunks.append(ChunkDocument(
-                content=chunk_text,
-                file_name=file_name,
-                file_path=file_path_value,
-                chunk_id=chunk_id
+                content=chunk_text.strip(),
+                metadata=metadata,
+                chunk_id=idx
             ))
+
         return parsed_chunks
 
     def parse_all(self) -> List[ChunkDocument]:
@@ -70,17 +72,16 @@ class ChunkedTextParser:
         return all_docs
 
 
+
 class MilvusLiteInserter:
-    def __init__(self, collection_name: str, db_path: str = DB_NAME):
+    def __init__(self, collection_name: str):
         self.collection_name = collection_name
-        # self.client = MilvusClient(uri=db_path) #milvus lite
         self.client = MilvusClient(uri="http://localhost:19530", token="root:Milvus")
 
         if not self.client.has_collection(collection_name):
             fields = [
-                FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=True),  
-                FieldSchema(name="file_name", dtype=DataType.VARCHAR, max_length=255),
-                FieldSchema(name="file_path", dtype=DataType.VARCHAR, max_length=1024),
+                FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=True),
+                FieldSchema(name="metadata", dtype=DataType.VARCHAR, max_length=2048),
                 FieldSchema(name="chunk_id", dtype=DataType.INT64),
                 FieldSchema(name="text", dtype=DataType.VARCHAR, max_length=65535),
                 FieldSchema(name="vector", dtype=DataType.FLOAT_VECTOR, dim=EMBEDDING_DIM),
@@ -97,7 +98,7 @@ class MilvusLiteInserter:
                 metric_type="COSINE",
                 index_type="IVF_FLAT",
                 index_name="vector_index",
-                params={ "nlist": 128 }
+                params={"nlist": 128}
             )
 
             self.client.create_index(
@@ -106,23 +107,24 @@ class MilvusLiteInserter:
             )
 
     def insert(self, docs: List[ChunkDocument], embedding_model):
+        if not docs:
+            print("⚠️ No documents to insert")
+            return
+
         contents = [doc.content for doc in docs]
         embeddings_raw = embedding_model.encode_documents(contents)
-        # dense 벡터 리스트 추출
         embeddings = [vec.tolist() for vec in embeddings_raw["dense"]]
+
         data = [{
-        "file_name": doc.file_name,
-        "file_path": doc.file_path,
-        "chunk_id": doc.chunk_id,
-        "text": doc.content,
-        "vector": emb
+            "metadata": json.dumps(doc.metadata),
+            "chunk_id": doc.chunk_id,
+            "text": doc.content,
+            "vector": emb
         } for doc, emb in zip(docs, embeddings)]
-        
-        if data:
-            self.client.insert(self.collection_name, data=data)
-            print(f"✅ {len(data)} chunks inserted into '{self.collection_name}'")
-        else:
-            print("⚠️ No documents to insert")
+
+        self.client.insert(self.collection_name, data=data)
+        print(f"✅ {len(data)} chunks inserted into '{self.collection_name}'")
+
 
 
 def main():
