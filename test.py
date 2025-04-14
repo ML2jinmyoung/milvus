@@ -2,33 +2,29 @@ from pymilvus import MilvusClient, DataType
 from pymilvus.model.hybrid import BGEM3EmbeddingFunction
 import pprint
 import torch
+import json
 
 COLLECTION_NAME = "kc"
+QUESTIONS = ["상장회사 자기주식 취득을 위한 절차는?", "계열사간 이사, 감사 겸직시 유의사항은?", "상근감사 연임은 언제까지 가능한가?",   "하도급 계약시 서면 미교부는 어떤 문제가 발생하는가?", "사내하도급시 유의할 사항은?"]
 
-device = "mps" if torch.backends.mps.is_available() else "cpu"
+# device = "mps" if torch.backends.mps.is_available() else "cpu"
 
 def search_documents(query: str, top_k: int = 3):
-    # Milvus 클라이언트 초기화
-    # client = MilvusClient("./kc.db")
     client = MilvusClient(uri="http://localhost:19530", token="root:Milvus")
     
-    # 컬렉션 로드 (milvus standalone일때 사용)
     client.load_collection(COLLECTION_NAME)
     
-    # 임베딩 모델 초기화
     embedding_model = BGEM3EmbeddingFunction(
         model_name="BAAI/bge-m3",
-        # device="cuda:0",
-        device=device,
+        device="cuda:0",
+        # device=device,
         return_dense=True
     )
     
-    # 쿼리 벡터 추출
     query_vector = embedding_model.encode_documents([query])["dense"][0].tolist()
     
-    # Milvus에서 검색
     search_params = {
-        "metric_type": "L2",
+        "metric_type": "COSINE",
         "offset": 0,
         "ignore_growing": False,
         "params": {"nprobe": 10}
@@ -37,7 +33,7 @@ def search_documents(query: str, top_k: int = 3):
     results = client.search(
         collection_name=COLLECTION_NAME,
         data=[query_vector],
-        output_fields=["text", "file_name", "file_path", "chunk_id"],
+        output_fields=["text", "metadata"],
         limit=top_k,
         **search_params
     )
@@ -49,10 +45,7 @@ def search_documents(query: str, top_k: int = 3):
 
         for hit in hits:
             entity = hit["entity"]  
-            print(f"\n document group: {entity['document_group']}")
-            print(f"\n📄 문서: {entity['file_name']}")
-            print(f"📂 경로: {entity['file_path']}")
-            print(f"청크 ID: {entity['chunk_id']}")
+            print(f"📂 정보: { json.loads(entity["metadata"])}")
             print(f"유사도 점수: {hit['distance']:.4f}")
             print("\n📝 내용:")
             print(entity["text"])
@@ -60,5 +53,5 @@ def search_documents(query: str, top_k: int = 3):
             # pprint.pprint(hit)
 
 if __name__ == "__main__":
-    query = "애순이 관식이"
+    query = QUESTIONS[2]
     search_documents(query, top_k=3)

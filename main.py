@@ -9,9 +9,9 @@ from pymilvus.model.hybrid import BGEM3EmbeddingFunction
 from pymilvus import CollectionSchema, FieldSchema
 import torch
 
-device = "mps" if torch.backends.mps.is_available() else "cpu"
+# device = "mps" if torch.backends.mps.is_available() else "cpu"
 
-CHUNKED_TXT_DIR = "./result"
+CHUNKED_TXT_DIR = "../preprocessing/result/web_disk"
 EMBEDDING_DIM = 1024
 DB_NAME = "./kc.db"
 COLLECTION_NAME = "kc"
@@ -23,14 +23,14 @@ DOCUMENT_GROUP = 'law'
 class ChunkDocument:
     content: str
     metadata: dict
-    chunk_id: int
 
 class ChunkedTextParser:
     def __init__(self, input_dir: str):
         self.input_dir = input_dir
         self.embedding_model = BGEM3EmbeddingFunction(
             model_name="BAAI/bge-m3",
-            device=device,
+            # device=device,
+            device="cuda:0",
             return_dense=True
         )
 
@@ -60,7 +60,6 @@ class ChunkedTextParser:
             parsed_chunks.append(ChunkDocument(
                 content=chunk_text.strip(),
                 metadata=metadata,
-                chunk_id=idx
             ))
 
         return parsed_chunks
@@ -82,7 +81,6 @@ class MilvusLiteInserter:
             fields = [
                 FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=True),
                 FieldSchema(name="metadata", dtype=DataType.VARCHAR, max_length=2048),
-                FieldSchema(name="chunk_id", dtype=DataType.INT64),
                 FieldSchema(name="text", dtype=DataType.VARCHAR, max_length=65535),
                 FieldSchema(name="vector", dtype=DataType.FLOAT_VECTOR, dim=EMBEDDING_DIM),
             ]
@@ -116,8 +114,7 @@ class MilvusLiteInserter:
         embeddings = [vec.tolist() for vec in embeddings_raw["dense"]]
 
         data = [{
-            "metadata": json.dumps(doc.metadata),
-            "chunk_id": doc.chunk_id,
+            "metadata": json.dumps(doc.metadata, ensure_ascii=False),
             "text": doc.content,
             "vector": emb
         } for doc, emb in zip(docs, embeddings)]
